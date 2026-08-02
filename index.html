@@ -51,9 +51,6 @@
   .bad { background: #450a0a; color: #fca5a5; border: 1px solid #7f1d1d; }
   .totals { margin: 26px 0 4px; padding-top: 16px; border-top: 1px solid #27272a; font-size: 13px; color: #a1a1aa; }
   .totals b { color: #fafafa; font-size: 15px; }
-  ul { list-style: none; padding: 0; margin: 10px 0 0; font-size: 13px; color: #a1a1aa; }
-  li { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; }
-  li span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .link { margin-top: 26px; font-size: 12px; color: #52525b; text-align: center; }
   .link a { color: #52525b; }
   .hide { display: none; }
@@ -80,9 +77,11 @@
     <button type="submit" id="submit">Add expense</button>
   </form>
 
+  <!-- Month total only. Past expenses are deliberately not listed here: this
+       page is reachable by anyone, so it should be able to reveal as little as
+       possible even to someone holding the token. Review history in Trakzen. -->
   <div id="summary" class="hide">
     <div class="totals">This month: <b id="total">—</b></div>
-    <ul id="recent"></ul>
   </div>
 
   <p class="link hide" id="forget"><a href="#" id="forgetLink">Forget token on this device</a></p>
@@ -113,17 +112,6 @@
   function render(data) {
     $("cur").textContent = data.currency;
     $("total").textContent = money(data.currency, data.monthTotal);
-    var ul = $("recent");
-    ul.innerHTML = "";
-    (data.recent || []).forEach(function (r) {
-      var li = document.createElement("li");
-      var a = document.createElement("span");
-      a.textContent = r.description;
-      var b = document.createElement("span");
-      b.textContent = money(data.currency, Number(r.amount) || 0);
-      li.appendChild(a); li.appendChild(b);
-      ul.appendChild(li);
-    });
     show($("summary"), true);
   }
 
