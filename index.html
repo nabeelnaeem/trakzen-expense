@@ -11,13 +11,23 @@
 <!--
   Quick-add expense screen. Talks to the Supabase edge function `expense`.
 
-  This page is deliberately hosted away from Supabase: every response from
+  Hosted away from Supabase on purpose: every response from
   *.supabase.co/functions/v1/* is forced to Content-Type: text/plain under a
-  sandbox CSP, so HTML served from there is shown as source instead of being
-  rendered. Only the API lives there; this is the UI.
+  sandbox CSP, so HTML served from there is shown as source. Only the API lives
+  there; this is the UI.
 
-  The token is NOT in this file or in the URL — this page is public. It is
-  entered once and kept in localStorage on the device.
+  On protection — this file is public and nothing here can change that. What is
+  protected is the *token*, and therefore the data:
+
+    * without a token the API answers 401, so this page shows nothing;
+    * with a PIN set, the token is stored AES-GCM encrypted under a key derived
+      from the PIN (PBKDF2, 250k iterations). localStorage holds ciphertext
+      only, so someone with the unlocked phone still cannot read your spending
+      or post expenses without the PIN.
+
+  A short PIN is still brute-forceable by someone who copies the ciphertext off
+  the device and grinds it offline. It defends against a person picking up your
+  phone, not against a determined attacker with your storage.
 -->
 <style>
   * { box-sizing: border-box; }
@@ -30,13 +40,27 @@
   h1 { font-size: 20px; margin: 0 0 4px; letter-spacing: -0.01em; }
   .sub { color: #a1a1aa; font-size: 13px; margin: 0 0 22px; }
   label { display: block; font-size: 13px; color: #d4d4d8; margin: 16px 0 6px; }
-  input {
+  .hint { font-size: 12px; color: #71717a; margin: 6px 0 0; }
+  input, select {
     width: 100%; padding: 13px 12px; font-size: 17px;
     background: #18181b; color: #fafafa;
     border: 1px solid #3f3f46; border-radius: 10px;
     -webkit-appearance: none; appearance: none;
   }
-  input:focus { outline: 2px solid #6366f1; outline-offset: 1px; }
+  select {
+    /* Native arrow is stripped by appearance:none, so draw one back. */
+    background-image: linear-gradient(45deg, transparent 50%, #a1a1aa 50%),
+                      linear-gradient(135deg, #a1a1aa 50%, transparent 50%);
+    background-position: calc(100% - 18px) 22px, calc(100% - 13px) 22px;
+    background-size: 5px 5px, 5px 5px;
+    background-repeat: no-repeat;
+    padding-right: 34px;
+  }
+  input:focus, select:focus { outline: 2px solid #6366f1; outline-offset: 1px; }
+  /* Date inputs render their own control on iOS; keep the text aligned. */
+  input[type="date"] { min-height: 49px; }
+  .row { display: flex; gap: 10px; }
+  .row > div { flex: 1; min-width: 0; }
   #amount { font-size: 30px; font-weight: 600; padding: 16px 12px; }
   button {
     width: 100%; margin-top: 24px; padding: 16px;
@@ -51,6 +75,18 @@
   .bad { background: #450a0a; color: #fca5a5; border: 1px solid #7f1d1d; }
   .totals { margin: 26px 0 4px; padding-top: 16px; border-top: 1px solid #27272a; font-size: 13px; color: #a1a1aa; }
   .totals b { color: #fafafa; font-size: 15px; }
+  details { margin-top: 14px; border-top: 1px solid #27272a; padding-top: 12px; }
+  summary {
+    font-size: 13px; color: #a1a1aa; cursor: pointer;
+    list-style: none; padding: 4px 0;
+  }
+  summary::-webkit-details-marker { display: none; }
+  summary::after { content: " ▾"; }
+  details[open] summary::after { content: " ▴"; }
+  ul { list-style: none; padding: 0; margin: 8px 0 0; font-size: 13px; color: #a1a1aa; }
+  li { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px solid #18181b; }
+  li .what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  li .when { font-size: 11px; color: #52525b; }
   .link { margin-top: 26px; font-size: 12px; color: #52525b; text-align: center; }
   .link a { color: #52525b; }
   .hide { display: none; }
@@ -58,15 +94,25 @@
 </head>
 <body>
   <h1>Add expense</h1>
-  <p class="sub" id="sub">Dated today · category set later in Trakzen</p>
+  <p class="sub">Goes straight to the cloud · your PC picks it up on its next sync</p>
 
   <div id="msg" class="msg hide"></div>
 
-  <!-- First run only: the device has no token yet. -->
+  <!-- First run: no credentials on this device yet. -->
   <div id="setup" class="hide">
     <label for="token">Access token</label>
     <input id="token" type="password" autocomplete="off" placeholder="paste the token once">
+    <label for="pin">PIN (optional)</label>
+    <input id="pin" type="password" inputmode="numeric" autocomplete="off" placeholder="leave blank for no lock">
+    <p class="hint">With a PIN, the token is encrypted on this device and asked for each time you open this page.</p>
     <button id="save">Save on this device</button>
+  </div>
+
+  <!-- Returning, with a PIN set: decrypt before anything is shown. -->
+  <div id="lock" class="hide">
+    <label for="unlockPin">PIN</label>
+    <input id="unlockPin" type="password" inputmode="numeric" autocomplete="off" placeholder="enter your PIN" enterkeyhint="go">
+    <button id="unlock">Unlock</button>
   </div>
 
   <form id="form" class="hide">
@@ -74,25 +120,43 @@
     <input id="amount" type="text" inputmode="decimal" pattern="[0-9.,]*" required placeholder="0">
     <label for="description">Spent on</label>
     <input id="description" required maxlength="300" placeholder="e.g. Groceries" enterkeyhint="done">
+    <div class="row">
+      <div>
+        <label for="date">Date</label>
+        <input id="date" type="date" required>
+      </div>
+      <div>
+        <label for="categoryId">Category</label>
+        <select id="categoryId">
+          <option value="">Uncategorised</option>
+        </select>
+      </div>
+    </div>
     <button type="submit" id="submit">Add expense</button>
   </form>
 
-  <!-- Month total only. Past expenses are deliberately not listed here: this
-       page is reachable by anyone, so it should be able to reveal as little as
-       possible even to someone holding the token. Review history in Trakzen. -->
   <div id="summary" class="hide">
     <div class="totals">This month: <b id="total">—</b></div>
+    <!-- Collapsed by default, and the history is not even fetched until this
+         is opened — so the usual response carries no itemised spending. -->
+    <details id="historyBox">
+      <summary>Recent expenses</summary>
+      <ul id="recent"></ul>
+      <p class="hint" id="historyNote">Opening this loads your last 20 expenses.</p>
+    </details>
   </div>
 
-  <p class="link hide" id="forget"><a href="#" id="forgetLink">Forget token on this device</a></p>
+  <p class="link hide" id="forget"><a href="#" id="forgetLink">Forget this device</a></p>
 
 <script>
-  // Point at your own function if you fork this.
   var API = "https://asulxbrhnzbqqvwxwhzr.supabase.co/functions/v1/expense";
-  var KEY = "trakzen.expense.token";
+  var STORE = "trakzen.expense.v2";
+  var LEGACY = "trakzen.expense.token";
+  var ITERATIONS = 250000;
 
   var $ = function (id) { return document.getElementById(id); };
-  var token = localStorage.getItem(KEY);
+  var token = null;          // plaintext, in memory only
+  var historyLoaded = false;
 
   function show(el, on) { el.classList.toggle("hide", !on); }
   function say(text, ok) {
@@ -101,6 +165,8 @@
     m.className = "msg " + (ok ? "ok" : "bad");
     show(m, true);
   }
+  function clearMsg() { show($("msg"), false); }
+
   function money(cur, n) {
     var whole = Math.abs(n % 1) < 0.005;
     return cur + " " + n.toLocaleString("en-US", {
@@ -109,51 +175,199 @@
     });
   }
 
-  function render(data) {
+  // ---- storage: plaintext, or AES-GCM under a PIN-derived key --------------
+
+  function b64(bytes) { return btoa(String.fromCharCode.apply(null, Array.from(bytes))); }
+  function unb64(s) { return Uint8Array.from(atob(s), function (c) { return c.charCodeAt(0); }); }
+
+  async function keyFromPin(pin, salt) {
+    var base = await crypto.subtle.importKey(
+      "raw", new TextEncoder().encode(pin), "PBKDF2", false, ["deriveKey"]
+    );
+    return crypto.subtle.deriveKey(
+      { name: "PBKDF2", salt: salt, iterations: ITERATIONS, hash: "SHA-256" },
+      base, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]
+    );
+  }
+
+  async function saveEncrypted(tok, pin) {
+    var salt = crypto.getRandomValues(new Uint8Array(16));
+    var iv = crypto.getRandomValues(new Uint8Array(12));
+    var key = await keyFromPin(pin, salt);
+    var ct = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv: iv }, key, new TextEncoder().encode(tok)
+    );
+    localStorage.setItem(STORE, JSON.stringify({
+      mode: "pin", salt: b64(salt), iv: b64(iv), ct: b64(new Uint8Array(ct))
+    }));
+  }
+
+  async function decryptWith(pin, rec) {
+    var key = await keyFromPin(pin, unb64(rec.salt));
+    var out = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv: unb64(rec.iv) }, key, unb64(rec.ct)
+    );
+    return new TextDecoder().decode(out);
+  }
+
+  function stored() {
+    var raw = localStorage.getItem(STORE);
+    if (raw) { try { return JSON.parse(raw); } catch (e) { return null; } }
+    // Carry over a token saved before PINs existed.
+    var old = localStorage.getItem(LEGACY);
+    if (old) {
+      var rec = { mode: "plain", token: old };
+      localStorage.setItem(STORE, JSON.stringify(rec));
+      localStorage.removeItem(LEGACY);
+      return rec;
+    }
+    return null;
+  }
+
+  // ---- rendering ----------------------------------------------------------
+
+  function renderSummary(data) {
     $("cur").textContent = data.currency;
     $("total").textContent = money(data.currency, data.monthTotal);
     show($("summary"), true);
+
+    // Default the date to "today" as the workspace reckons it, not the
+    // phone's clock — a trip abroad shouldn't file expenses on the wrong day.
+    if (!$("date").value) $("date").value = data.today;
+
+    // Rebuild the category list, keeping whatever was already picked.
+    if (data.categories) {
+      var sel = $("categoryId");
+      var keep = sel.value;
+      sel.innerHTML = "";
+      var none = document.createElement("option");
+      none.value = "";
+      none.textContent = "Uncategorised";
+      sel.appendChild(none);
+      data.categories.forEach(function (c) {
+        var o = document.createElement("option");
+        o.value = c.id;
+        o.textContent = c.name;
+        sel.appendChild(o);
+      });
+      sel.value = keep;
+    }
   }
 
-  // Verifies the stored token and loads the summary in one call.
-  function load() {
-    return fetch(API, { headers: { "x-expense-token": token } })
+  function renderHistory(currency, rows) {
+    var ul = $("recent");
+    ul.innerHTML = "";
+    if (!rows || rows.length === 0) {
+      show($("historyNote"), true);
+      $("historyNote").textContent = "Nothing recorded yet.";
+      return;
+    }
+    rows.forEach(function (r) {
+      var li = document.createElement("li");
+      var left = document.createElement("span");
+      left.className = "what";
+      left.textContent = r.description;
+      var right = document.createElement("span");
+      right.textContent = money(currency, Number(r.amount) || 0);
+      var when = document.createElement("div");
+      when.className = "when";
+      when.textContent = r.date;
+      left.appendChild(when);
+      li.appendChild(left); li.appendChild(right);
+      ul.appendChild(li);
+    });
+    show($("historyNote"), false);
+  }
+
+  function enterApp() {
+    show($("setup"), false);
+    show($("lock"), false);
+    show($("form"), true);
+    show($("forget"), true);
+    clearMsg();
+  }
+
+  function lockOut(message) {
+    token = null;
+    historyLoaded = false;
+    show($("form"), false);
+    show($("summary"), false);
+    show($("forget"), false);
+    if (message) say(message, false);
+  }
+
+  // Verifies the token and loads the summary in one call.
+  function load(withHistory) {
+    var url = API + (withHistory ? "?history=1" : "");
+    return fetch(url, { headers: { "x-expense-token": token } })
       .then(function (r) {
         if (r.status === 401) throw new Error("That token was not accepted.");
         if (!r.ok) throw new Error("Server said " + r.status);
         return r.json();
       })
       .then(function (data) {
-        show($("setup"), false);
-        show($("form"), true);
-        show($("forget"), true);
-        show($("msg"), false);
-        render(data);
-      })
-      .catch(function (e) {
-        localStorage.removeItem(KEY);
-        token = null;
-        show($("form"), false);
-        show($("summary"), false);
-        show($("forget"), false);
-        show($("setup"), true);
-        say(e.message, false);
+        enterApp();
+        renderSummary(data);
+        if (data.recent) { renderHistory(data.currency, data.recent); historyLoaded = true; }
+        return data;
       });
   }
 
+  // ---- events -------------------------------------------------------------
+
   $("save").addEventListener("click", function () {
-    var v = $("token").value.trim();
-    if (!v) return;
-    token = v;
-    localStorage.setItem(KEY, v);
-    $("token").value = "";
-    load();
+    var tok = $("token").value.trim();
+    var pin = $("pin").value.trim();
+    if (!tok) return;
+    $("save").disabled = true;
+    token = tok;
+    load(false)
+      .then(function () {
+        if (pin) return saveEncrypted(tok, pin);
+        localStorage.setItem(STORE, JSON.stringify({ mode: "plain", token: tok }));
+      })
+      .then(function () {
+        $("token").value = "";
+        $("pin").value = "";
+      })
+      .catch(function (e) {
+        localStorage.removeItem(STORE);
+        lockOut(e.message);
+        show($("setup"), true);
+      })
+      .finally(function () { $("save").disabled = false; });
+  });
+
+  function tryUnlock() {
+    var rec = stored();
+    var pin = $("unlockPin").value;
+    if (!rec || !pin) return;
+    $("unlock").disabled = true;
+    decryptWith(pin, rec)
+      .then(function (tok) {
+        token = tok;
+        $("unlockPin").value = "";
+        return load(false);
+      })
+      .catch(function () { say("Wrong PIN.", false); })
+      .finally(function () { $("unlock").disabled = false; });
+  }
+  $("unlock").addEventListener("click", tryUnlock);
+  $("unlockPin").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") { e.preventDefault(); tryUnlock(); }
   });
 
   $("forgetLink").addEventListener("click", function (e) {
     e.preventDefault();
-    localStorage.removeItem(KEY);
+    localStorage.removeItem(STORE);
+    localStorage.removeItem(LEGACY);
     location.reload();
+  });
+
+  // Fetch history the first time the section is opened, not before.
+  $("historyBox").addEventListener("toggle", function () {
+    if (!$("historyBox").open || historyLoaded || !token) return;
+    load(true).catch(function (e) { say(e.message, false); });
   });
 
   $("form").addEventListener("submit", function (e) {
@@ -168,7 +382,12 @@
     fetch(API, {
       method: "POST",
       headers: { "content-type": "application/json", "x-expense-token": token },
-      body: JSON.stringify({ amount: amount, description: description })
+      body: JSON.stringify({
+        amount: amount,
+        description: description,
+        date: $("date").value,
+        categoryId: $("categoryId").value
+      })
     })
       .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
       .then(function (res) {
@@ -176,8 +395,11 @@
         say("Saved " + money(res.body.currency, res.body.amount) + " · " + res.body.description, true);
         $("amount").value = "";
         $("description").value = "";
+        // Date and category are deliberately kept: entering a run of expenses
+        // for the same day or bucket shouldn't mean re-picking them each time.
         $("amount").focus();
-        return load();
+        // Refresh history too if it is on screen, so the new row shows up.
+        return load($("historyBox").open);
       })
       .catch(function (e) { say(e.message, false); })
       .finally(function () {
@@ -186,7 +408,19 @@
       });
   });
 
-  if (token) { load(); } else { show($("setup"), true); }
+  // ---- boot ---------------------------------------------------------------
+
+  (function boot() {
+    var rec = stored();
+    if (!rec) { show($("setup"), true); return; }
+    if (rec.mode === "pin") { show($("lock"), true); $("unlockPin").focus(); return; }
+    token = rec.token;
+    load(false).catch(function (e) {
+      localStorage.removeItem(STORE);
+      lockOut(e.message);
+      show($("setup"), true);
+    });
+  })();
 </script>
 </body>
 </html>
