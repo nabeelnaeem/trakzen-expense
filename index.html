@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#09090b">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="robots" content="noindex">
+<title>Add expense</title>
+<!--
+  Quick-add expense screen. Talks to the Supabase edge function `expense`.
+
+  This page is deliberately hosted away from Supabase: every response from
+  *.supabase.co/functions/v1/* is forced to Content-Type: text/plain under a
+  sandbox CSP, so HTML served from there is shown as source instead of being
+  rendered. Only the API lives there; this is the UI.
+
+  The token is NOT in this file or in the URL — this page is public. It is
+  entered once and kept in localStorage on the device.
+-->
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 22px 16px 40px;
+    font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #09090b; color: #fafafa;
+    -webkit-tap-highlight-color: transparent;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { color: #a1a1aa; font-size: 13px; margin: 0 0 22px; }
+  label { display: block; font-size: 13px; color: #d4d4d8; margin: 16px 0 6px; }
+  input {
+    width: 100%; padding: 13px 12px; font-size: 17px;
+    background: #18181b; color: #fafafa;
+    border: 1px solid #3f3f46; border-radius: 10px;
+    -webkit-appearance: none; appearance: none;
+  }
+  input:focus { outline: 2px solid #6366f1; outline-offset: 1px; }
+  #amount { font-size: 30px; font-weight: 600; padding: 16px 12px; }
+  button {
+    width: 100%; margin-top: 24px; padding: 16px;
+    font-size: 17px; font-weight: 600;
+    background: #fafafa; color: #09090b;
+    border: 0; border-radius: 10px;
+  }
+  button:disabled { opacity: .5; }
+  button:active { opacity: .8; }
+  .msg { padding: 12px 14px; border-radius: 10px; margin-bottom: 16px; font-size: 14px; }
+  .ok  { background: #052e16; color: #86efac; border: 1px solid #166534; }
+  .bad { background: #450a0a; color: #fca5a5; border: 1px solid #7f1d1d; }
+  .totals { margin: 26px 0 4px; padding-top: 16px; border-top: 1px solid #27272a; font-size: 13px; color: #a1a1aa; }
+  .totals b { color: #fafafa; font-size: 15px; }
+  ul { list-style: none; padding: 0; margin: 10px 0 0; font-size: 13px; color: #a1a1aa; }
+  li { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; }
+  li span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .link { margin-top: 26px; font-size: 12px; color: #52525b; text-align: center; }
+  .link a { color: #52525b; }
+  .hide { display: none; }
+</style>
+</head>
+<body>
+  <h1>Add expense</h1>
+  <p class="sub" id="sub">Dated today · category set later in Trakzen</p>
+
+  <div id="msg" class="msg hide"></div>
+
+  <!-- First run only: the device has no token yet. -->
+  <div id="setup" class="hide">
+    <label for="token">Access token</label>
+    <input id="token" type="password" autocomplete="off" placeholder="paste the token once">
+    <button id="save">Save on this device</button>
+  </div>
+
+  <form id="form" class="hide">
+    <label for="amount">Amount (<span id="cur">PKR</span>)</label>
+    <input id="amount" type="text" inputmode="decimal" pattern="[0-9.,]*" required placeholder="0">
+    <label for="description">Spent on</label>
+    <input id="description" required maxlength="300" placeholder="e.g. Groceries" enterkeyhint="done">
+    <button type="submit" id="submit">Add expense</button>
+  </form>
+
+  <div id="summary" class="hide">
+    <div class="totals">This month: <b id="total">—</b></div>
+    <ul id="recent"></ul>
+  </div>
+
+  <p class="link hide" id="forget"><a href="#" id="forgetLink">Forget token on this device</a></p>
+
+<script>
+  // Point at your own function if you fork this.
+  var API = "https://asulxbrhnzbqqvwxwhzr.supabase.co/functions/v1/expense";
+  var KEY = "trakzen.expense.token";
+
+  var $ = function (id) { return document.getElementById(id); };
+  var token = localStorage.getItem(KEY);
+
+  function show(el, on) { el.classList.toggle("hide", !on); }
+  function say(text, ok) {
+    var m = $("msg");
+    m.textContent = text;
+    m.className = "msg " + (ok ? "ok" : "bad");
+    show(m, true);
+  }
+  function money(cur, n) {
+    var whole = Math.abs(n % 1) < 0.005;
+    return cur + " " + n.toLocaleString("en-US", {
+      minimumFractionDigits: whole ? 0 : 2,
+      maximumFractionDigits: whole ? 0 : 2
+    });
+  }
+
+  function render(data) {
+    $("cur").textContent = data.currency;
+    $("total").textContent = money(data.currency, data.monthTotal);
+    var ul = $("recent");
+    ul.innerHTML = "";
+    (data.recent || []).forEach(function (r) {
+      var li = document.createElement("li");
+      var a = document.createElement("span");
+      a.textContent = r.description;
+      var b = document.createElement("span");
+      b.textContent = money(data.currency, Number(r.amount) || 0);
+      li.appendChild(a); li.appendChild(b);
+      ul.appendChild(li);
+    });
+    show($("summary"), true);
+  }
+
+  // Verifies the stored token and loads the summary in one call.
+  function load() {
+    return fetch(API, { headers: { "x-expense-token": token } })
+      .then(function (r) {
+        if (r.status === 401) throw new Error("That token was not accepted.");
+        if (!r.ok) throw new Error("Server said " + r.status);
+        return r.json();
+      })
+      .then(function (data) {
+        show($("setup"), false);
+        show($("form"), true);
+        show($("forget"), true);
+        show($("msg"), false);
+        render(data);
+      })
+      .catch(function (e) {
+        localStorage.removeItem(KEY);
+        token = null;
+        show($("form"), false);
+        show($("summary"), false);
+        show($("forget"), false);
+        show($("setup"), true);
+        say(e.message, false);
+      });
+  }
+
+  $("save").addEventListener("click", function () {
+    var v = $("token").value.trim();
+    if (!v) return;
+    token = v;
+    localStorage.setItem(KEY, v);
+    $("token").value = "";
+    load();
+  });
+
+  $("forgetLink").addEventListener("click", function (e) {
+    e.preventDefault();
+    localStorage.removeItem(KEY);
+    location.reload();
+  });
+
+  $("form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    var amount = $("amount").value.trim();
+    var description = $("description").value.trim();
+    if (!amount || !description) return;
+
+    $("submit").disabled = true;
+    $("submit").textContent = "Saving…";
+
+    fetch(API, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-expense-token": token },
+      body: JSON.stringify({ amount: amount, description: description })
+    })
+      .then(function (r) { return r.json().then(function (b) { return { ok: r.ok, body: b }; }); })
+      .then(function (res) {
+        if (!res.ok) throw new Error(res.body.error || "Could not save");
+        say("Saved " + money(res.body.currency, res.body.amount) + " · " + res.body.description, true);
+        $("amount").value = "";
+        $("description").value = "";
+        $("amount").focus();
+        return load();
+      })
+      .catch(function (e) { say(e.message, false); })
+      .finally(function () {
+        $("submit").disabled = false;
+        $("submit").textContent = "Add expense";
+      });
+  });
+
+  if (token) { load(); } else { show($("setup"), true); }
+</script>
+</body>
+</html>
