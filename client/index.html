@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#09090b">
+<meta name="robots" content="noindex">
+<title>Project hours</title>
+<!--
+  Client portal. Talks to the Supabase edge function `client`.
+
+  Hosted away from Supabase for the same reason as expense.html: every response
+  from *.supabase.co/functions/v1/* is forced to text/plain under a sandbox
+  CSP, so HTML served from there is shown as source. Only the API lives there.
+
+  The link a client is given carries their own portal token (?t=...). That
+  token resolves server-side to exactly one client row, and every query is
+  filtered by it — there is no parameter here through which a caller could ask
+  for another client's hours, an invoice, or anything else in the workspace.
+  Rotating the token in the desktop app revokes the link.
+
+  Deliberately no PIN, unlike the expense page: this shows the client their own
+  hours, which they are entitled to see, and a lock would only be in the way.
+-->
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0 auto; padding: 24px 16px 48px; max-width: 780px;
+    font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #09090b; color: #fafafa;
+    -webkit-tap-highlight-color: transparent;
+  }
+  h1 { font-size: 21px; margin: 0 0 2px; letter-spacing: -0.01em; }
+  .sub { color: #a1a1aa; font-size: 13px; margin: 0 0 20px; }
+  .tabs { display: flex; gap: 6px; margin-bottom: 20px; }
+  .tabs button {
+    flex: 0 0 auto; padding: 9px 16px; font-size: 14px; font-weight: 500;
+    background: #18181b; color: #a1a1aa;
+    border: 1px solid #27272a; border-radius: 999px; cursor: pointer;
+  }
+  .tabs button[aria-selected="true"] { background: #fafafa; color: #09090b; border-color: #fafafa; }
+  label { display: block; font-size: 13px; color: #d4d4d8; margin: 16px 0 6px; }
+  input, select, textarea {
+    width: 100%; padding: 12px; font-size: 16px;
+    background: #18181b; color: #fafafa;
+    border: 1px solid #3f3f46; border-radius: 10px;
+    -webkit-appearance: none; appearance: none; font-family: inherit;
+  }
+  select {
+    background-image: linear-gradient(45deg, transparent 50%, #a1a1aa 50%),
+                      linear-gradient(135deg, #a1a1aa 50%, transparent 50%);
+    background-position: calc(100% - 18px) 21px, calc(100% - 13px) 21px;
+    background-size: 5px 5px, 5px 5px; background-repeat: no-repeat; padding-right: 34px;
+  }
+  textarea { min-height: 120px; resize: vertical; line-height: 1.5; }
+  input:focus, select:focus, textarea:focus { outline: 2px solid #6366f1; outline-offset: 1px; }
+  button.primary {
+    width: 100%; margin-top: 20px; padding: 15px;
+    font-size: 16px; font-weight: 600; background: #fafafa; color: #09090b;
+    border: 0; border-radius: 10px; cursor: pointer;
+  }
+  button.primary:disabled { opacity: .5; }
+  .msg { padding: 12px 14px; border-radius: 10px; margin-bottom: 16px; font-size: 14px; }
+  .ok  { background: #052e16; color: #86efac; border: 1px solid #166534; }
+  .bad { background: #450a0a; color: #fca5a5; border: 1px solid #7f1d1d; }
+  .stats { display: flex; gap: 10px; margin: 18px 0 22px; }
+  .stat { flex: 1; background: #18181b; border: 1px solid #27272a; border-radius: 12px; padding: 13px 14px; }
+  .stat .k { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: #71717a; }
+  .stat .v { font-size: 22px; font-weight: 600; margin-top: 3px; }
+  .day { border-top: 1px solid #27272a; padding: 14px 0 4px; }
+  .day-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  .day-date { font-size: 14px; font-weight: 600; }
+  .day-total { font-size: 13px; color: #a1a1aa; font-variant-numeric: tabular-nums; }
+  .entry { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; font-size: 14px; }
+  .entry .what { min-width: 0; }
+  .entry .desc { display: block; font-size: 12px; color: #71717a; margin-top: 2px; }
+  .entry .mins { color: #a1a1aa; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .empty { color: #71717a; font-size: 14px; padding: 24px 0; text-align: center; }
+  .hide { display: none; }
+  .foot { margin-top: 34px; padding-top: 14px; border-top: 1px solid #18181b; font-size: 11px; color: #3f3f46; text-align: center; }
+</style>
+</head>
+<body>
+  <h1 id="title">Project hours</h1>
+  <p class="sub" id="who">Loading…</p>
+
+  <div id="msg" class="msg hide"></div>
+
+  <div class="tabs" role="tablist">
+    <button id="tabTime" role="tab" aria-selected="true">Hours</button>
+    <button id="tabNote" role="tab" aria-selected="false">Send a note</button>
+  </div>
+
+  <section id="paneTime">
+    <label for="month">Month</label>
+    <select id="month"></select>
+
+    <div class="stats">
+      <div class="stat"><div class="k">Total</div><div class="v" id="total">—</div></div>
+      <div class="stat"><div class="k">Entries</div><div class="v" id="count">—</div></div>
+      <div class="stat"><div class="k">Days</div><div class="v" id="days">—</div></div>
+    </div>
+
+    <div id="list"></div>
+  </section>
+
+  <section id="paneNote" class="hide">
+    <label for="author">From</label>
+    <select id="author"></select>
+    <label for="noteTitle">Subject</label>
+    <input id="noteTitle" maxlength="200" placeholder="e.g. Login page feedback">
+    <label for="noteBody">Note</label>
+    <textarea id="noteBody" maxlength="5000" placeholder="Anything you want passed on…"></textarea>
+    <button class="primary" id="send">Send note</button>
+    <p class="sub" style="margin-top:14px">Goes straight to the cloud · appears on the developer's machine on its next sync.</p>
+  </section>
+
+  <p class="foot">Trakzen</p>
+
+<script>
+(function () {
+  "use strict";
+
+  var API = "https://asulxbrhnzbqqvwxwhzr.supabase.co/functions/v1/client";
+  var STORE = "trakzen.portal.token";
+
+  var el = function (id) { return document.getElementById(id); };
+  var msg = el("msg");
+
+  function say(text, bad) {
+    msg.textContent = text;
+    msg.className = "msg " + (bad ? "bad" : "ok");
+    if (!bad) setTimeout(function () { msg.className = "msg hide"; }, 4000);
+  }
+
+  // The token arrives in the link. Remembering it means a bookmark of the bare
+  // page still works; keeping it in the URL means the original link still does.
+  function token() {
+    var fromUrl = new URLSearchParams(location.search).get("t");
+    if (fromUrl) {
+      try { localStorage.setItem(STORE, fromUrl); } catch (e) { /* private mode */ }
+      return fromUrl;
+    }
+    try { return localStorage.getItem(STORE) || ""; } catch (e) { return ""; }
+  }
+
+  var TOKEN = token();
+
+  function call(path, options) {
+    var opts = options || {};
+    opts.headers = Object.assign({ "x-portal-token": TOKEN }, opts.headers || {});
+    return fetch(API + path, opts).then(function (r) {
+      return r.json().then(function (body) {
+        if (!r.ok) throw new Error(body && body.error ? body.error : "Request failed");
+        return body;
+      });
+    });
+  }
+
+  function hours(minutes) {
+    var h = Math.floor(minutes / 60);
+    var m = minutes % 60;
+    return m ? h + "h " + m + "m" : h + "h";
+  }
+
+  function monthLabel(key) {
+    var parts = key.split("-");
+    var d = new Date(Number(parts[0]), Number(parts[1]) - 1, 1);
+    return d.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  }
+
+  function dayLabel(key) {
+    var p = key.split("-");
+    var d = new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]));
+    return d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+  }
+
+  function render(data) {
+    el("who").textContent = data.org
+      ? data.org + " · " + data.client
+      : data.client || "";
+    el("total").textContent = hours(data.totalMinutes || 0);
+    el("count").textContent = String(data.entryCount || 0);
+    el("days").textContent = String((data.days || []).length);
+
+    var list = el("list");
+    list.textContent = "";
+    if (!data.days || !data.days.length) {
+      var none = document.createElement("p");
+      none.className = "empty";
+      none.textContent = "No hours logged in this month.";
+      list.appendChild(none);
+      return;
+    }
+
+    data.days.forEach(function (day) {
+      var wrap = document.createElement("div");
+      wrap.className = "day";
+
+      var head = document.createElement("div");
+      head.className = "day-head";
+      var date = document.createElement("span");
+      date.className = "day-date";
+      date.textContent = dayLabel(day.date);
+      var tot = document.createElement("span");
+      tot.className = "day-total";
+      tot.textContent = hours(day.minutes);
+      head.appendChild(date);
+      head.appendChild(tot);
+      wrap.appendChild(head);
+
+      day.entries.forEach(function (entry) {
+        var row = document.createElement("div");
+        row.className = "entry";
+        var what = document.createElement("span");
+        what.className = "what";
+        // textContent throughout: entry titles are the developer's own text,
+        // but building the DOM by hand keeps it that way whatever they type.
+        what.textContent = entry.title;
+        if (entry.description) {
+          var d = document.createElement("span");
+          d.className = "desc";
+          d.textContent = entry.description;
+          what.appendChild(d);
+        }
+        var mins = document.createElement("span");
+        mins.className = "mins";
+        mins.textContent = hours(entry.minutes);
+        row.appendChild(what);
+        row.appendChild(mins);
+        wrap.appendChild(row);
+      });
+
+      list.appendChild(wrap);
+    });
+  }
+
+  function loadReport(month) {
+    return call("/report" + (month ? "?month=" + encodeURIComponent(month) : ""))
+      .then(function (data) {
+        var select = el("month");
+        if (!select.options.length && data.months) {
+          data.months.forEach(function (key) {
+            var opt = document.createElement("option");
+            opt.value = key;
+            opt.textContent = monthLabel(key);
+            select.appendChild(opt);
+          });
+          if (!data.months.length) {
+            var opt = document.createElement("option");
+            opt.value = data.month;
+            opt.textContent = monthLabel(data.month);
+            select.appendChild(opt);
+          }
+        }
+        select.value = data.month;
+        render(data);
+      });
+  }
+
+  function loadAuthors() {
+    return call("/notes").then(function (data) {
+      var select = el("author");
+      select.textContent = "";
+      (data.authors || []).forEach(function (a) {
+        var opt = document.createElement("option");
+        opt.value = a.id;
+        opt.textContent = a.name;
+        select.appendChild(opt);
+      });
+      if (!select.options.length) {
+        var opt = document.createElement("option");
+        opt.value = "";
+        opt.textContent = "(not specified)";
+        select.appendChild(opt);
+      }
+    });
+  }
+
+  function show(tab) {
+    var time = tab === "time";
+    el("tabTime").setAttribute("aria-selected", String(time));
+    el("tabNote").setAttribute("aria-selected", String(!time));
+    el("paneTime").className = time ? "" : "hide";
+    el("paneNote").className = time ? "hide" : "";
+  }
+
+  el("tabTime").addEventListener("click", function () { show("time"); });
+  el("tabNote").addEventListener("click", function () { show("note"); });
+  el("month").addEventListener("change", function () {
+    loadReport(el("month").value).catch(function (e) { say(e.message, true); });
+  });
+
+  el("send").addEventListener("click", function () {
+    var title = el("noteTitle").value.trim();
+    if (!title) { say("Give the note a subject", true); return; }
+    var button = el("send");
+    button.disabled = true;
+    call("/notes", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        authorId: el("author").value,
+        title: title,
+        body: el("noteBody").value,
+      }),
+    })
+      .then(function () {
+        el("noteTitle").value = "";
+        el("noteBody").value = "";
+        say("Sent — it will reach the developer shortly");
+      })
+      .catch(function (e) { say(e.message, true); })
+      // Re-enabled either way, so a failed send can be retried.
+      .finally(function () { button.disabled = false; });
+  });
+
+  if (!TOKEN) {
+    el("who").textContent = "This link is missing its access code.";
+    document.querySelector(".tabs").className = "tabs hide";
+    el("paneTime").className = "hide";
+  } else {
+    loadReport(null)
+      .then(loadAuthors)
+      .catch(function (e) {
+        el("who").textContent = e.message;
+        document.querySelector(".tabs").className = "tabs hide";
+        el("paneTime").className = "hide";
+      });
+  }
+})();
+</script>
+</body>
+</html>
