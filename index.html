@@ -117,7 +117,10 @@
 
   <form id="form" class="hide">
     <label for="amount">Amount (<span id="cur">PKR</span>)</label>
-    <input id="amount" type="text" inputmode="decimal" pattern="[0-9.,]*" required placeholder="0">
+    <!-- The minus is in the pattern on purpose: a negative amount is an
+         adjustment (refund, cashback, correction) and nets off the month. -->
+    <input id="amount" type="text" inputmode="text" pattern="-?[0-9.,]*" required placeholder="0">
+    <p class="hint">Tip: a minus sign records an adjustment, e.g. <code>-500</code> for a refund.</p>
     <label for="description">Spent on</label>
     <input id="description" required maxlength="300" placeholder="e.g. Groceries" enterkeyhint="done">
     <div class="row">
